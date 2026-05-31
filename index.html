@@ -119,7 +119,7 @@
 
             // KONEKSI KE BROKER MQTT (Ubah URL ini sesuai Broker Node-RED kamu)
             // ws://localhost:9001 biasanya default websocket port mosquitto/Aedes di lokal
-            const brokerUrl = "ws://broker.emqx.io:8083/mqtt"; 
+            const brokerUrl = "wss://broker.emqx.io:8084/mqtt"; 
             const client = mqtt.connect(brokerUrl);
             
             mqttClientRef.current = client;
