@@ -3,24 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Conveyor Dashboard - MQTT</title>
-    <!-- CSS -->
+    <title>Conveyor Dashboard - Firebase</title>
     <script src="https://cdn.tailwindcss.com"></script>
     
-    <!-- Babel untuk JSX -->
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     
-    <!-- Library MQTT untuk Web (WebSockets) -->
-    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
-    
-    <!-- Import Map -->
     <script type="importmap">
     {
       "imports": {
         "react": "https://esm.sh/react@18.2.0",
         "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
         "recharts": "https://esm.sh/recharts@2.12.0?deps=react@18.2.0,react-dom@18.2.0",
-        "lucide-react": "https://esm.sh/lucide-react@0.344.0?deps=react@18.2.0"
+        "lucide-react": "https://esm.sh/lucide-react@0.344.0?deps=react@18.2.0",
+        "firebase/app": "https://esm.sh/firebase@10.10.0/app",
+        "firebase/database": "https://esm.sh/firebase@10.10.0/database"
       }
     }
     </script>
@@ -32,7 +28,6 @@
 <body>
     <div id="root"></div>
 
-    <!-- INI ADALAH BAGIAN JAVASCRIPT / REACT NYA -->
     <script type="text/babel" data-type="module">
         import React, { useState, useEffect, useRef } from "react";
         import { createRoot } from "react-dom/client";
@@ -43,9 +38,27 @@
         } from "recharts";
         import {
           Wifi, WifiOff, Activity, AlertTriangle, Zap,
-          Power, Radio, Settings, Gauge, RotateCw,
+          Power, Database, Settings, Gauge, RotateCw,
           ShieldAlert, CheckCircle2, Clock, TrendingUp, Cpu
         } from "lucide-react";
+        
+        // --- INISIALISASI FIREBASE ---
+        import { initializeApp } from "firebase/app";
+        import { getDatabase, ref, onValue, set } from "firebase/database";
+
+        const firebaseConfig = {
+          apiKey: "AIzaSyAZq9dzRoxUtxT3DnjsHImudc888oCeQsk",
+          authDomain: "conveyor-tensioning.firebaseapp.com",
+          databaseURL: "https://conveyor-tensioning-default-rtdb.asia-southeast1.firebasedatabase.app",
+          projectId: "conveyor-tensioning",
+          storageBucket: "conveyor-tensioning.firebasestorage.app",
+          messagingSenderId: "72558521683",
+          appId: "1:72558521683:web:bf26c6156a291e06ce45a6",
+          measurementId: "G-YMZX7VXHBC"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
 
         const MAX_PTS = 40;
 
@@ -79,7 +92,7 @@
           const [oscData, setOscData] = useState(init.osc);
 
           const [espOnline, setEspOnline] = useState(false);
-          const [mqttOnline, setMqttOnline] = useState(false);
+          const [firebaseOnline, setFirebaseOnline] = useState(false);
           const [machineStatus, setMachineStatus] = useState("normal");
           const [stopped, setStopped] = useState(false);
 
@@ -98,12 +111,11 @@
           const [pidMsg, setPidMsg] = useState("");
 
           const [alarms, setAlarms] = useState([
-            { time: "00:00", msg: "Menunggu koneksi MQTT...", type: "info" }
+            { time: "00:00", msg: "Menunggu koneksi Firebase...", type: "info" }
           ]);
 
           const tickRef = useRef(MAX_PTS);
-          const lastAlarmTickRef = useRef(0);
-          const mqttClientRef = useRef(null);
+          const espTimeoutRef = useRef(null);
 
           function addAlarm(msg, type) {
             const now = new Date();
@@ -112,114 +124,100 @@
           }
 
           // ==========================================
-          // BAGIAN PENERIMA DATA DARI MQTT (NODE-RED)
+          // BAGIAN PEMBACAAN DATA DARI FIREBASE
           // ==========================================
           useEffect(() => {
             if (stopped) return;
 
-            // KONEKSI KE BROKER MQTT (Ubah URL ini sesuai Broker Node-RED kamu)
-            // ws://localhost:9001 biasanya default websocket port mosquitto/Aedes di lokal
-            const brokerUrl = "wss://broker.emqx.io:8084/mqtt"; 
-            const client = mqtt.connect(brokerUrl);
-            
-            mqttClientRef.current = client;
-
-            client.on("connect", () => {
-              console.log("Berhasil terhubung ke MQTT Broker!");
-              setMqttOnline(true);
-              setEspOnline(true); // Asumsi ESP nyala jika MQTT nyala
-              addAlarm("Terhubung ke MQTT Broker (" + brokerUrl + ")", "success");
-              
-              // Subscribe ke topik sensor ESP32
-              client.subscribe("eki/conveyor/sensor"); 
-            });
-
-            client.on("message", (topic, message) => {
-              if (topic === "eki/conveyor/sensor") {
-                try {
-                    const data = JSON.parse(message.toString());
-                    const t = ++tickRef.current;
-
-                    // Update angka di layar utama
-                    setTension(data.tension || 0);
-                    setRpm(data.rpm || 0);
-                    setSlip(data.slip || 0);
-                    setStepPos(data.stepPos || 0);
-
-                    // Masukkan ke grafik agar bergerak
-                    setTensionData(p => [...p.slice(-(MAX_PTS - 1)), { t, actual: data.tension || 0, sp: activeSP }]);
-                    setSpeedData(p => [...p.slice(-(MAX_PTS - 1)), { t, rpm: data.rpm || 0, slip: data.slip || 0 }]);
-                    
-                    // Simulasi nilai osilasi acak berdasarkan RPM (karena biasanya encoder gak ngirim osilasi getaran langsung)
-                    const oscVal = +(Math.sin(t) * (data.rpm / 400) + (Math.random() - 0.5)).toFixed(2);
-                    setOscData(p => [...p.slice(-(MAX_PTS - 1)), { t, v: oscVal }]);
-
-                    // Sistem alarm otomatis
-                    if (data.tension > 188 || data.slip > 5.8) setMachineStatus("danger");
-                    else if (data.tension > 165 || data.slip > 3.8) setMachineStatus("warning");
-                    else setMachineStatus("normal");
-                } catch(err) {
-                    console.log("Error parsing JSON dari MQTT", err);
-                }
+            // 1. Pantau Status Koneksi Dashboard ke Firebase
+            const connectedRef = ref(db, ".info/connected");
+            const unsubConnected = onValue(connectedRef, (snap) => {
+              if (snap.val() === true) {
+                setFirebaseOnline(true);
+                addAlarm("Terhubung ke Firebase Realtime Database", "success");
+              } else {
+                setFirebaseOnline(false);
+                setEspOnline(false); // Kalau web putus dari Firebase, ESP juga dianggap tidak terpantau
+                addAlarm("Koneksi Firebase terputus", "danger");
               }
             });
 
-            client.on("error", (err) => {
-              console.error("MQTT Error: ", err);
-              setMqttOnline(false);
-              setEspOnline(false);
+            // 2. Pantau Data Sensor dari ESP32
+            // Asumsi path di database adalah: eki/conveyor/sensor
+            const sensorRef = ref(db, "eki/conveyor/sensor");
+            const unsubSensor = onValue(sensorRef, (snapshot) => {
+              const data = snapshot.val();
+              if (data) {
+                // Jika ada data masuk, ESP dipastikan online
+                if (!espOnline) {
+                    setEspOnline(true);
+                    addAlarm("ESP32 Online & Mengirim Data", "success");
+                }
+
+                // Reset timer watchdog. Jika 6 detik tidak ada data masuk = ESP Offline
+                clearTimeout(espTimeoutRef.current);
+                espTimeoutRef.current = setTimeout(() => {
+                  setEspOnline(false);
+                  addAlarm("ESP32 Disconnected (Timeout - Tidak ada data sensor)", "danger");
+                }, 6000);
+
+                const t = ++tickRef.current;
+
+                setTension(data.tension || 0);
+                setRpm(data.rpm || 0);
+                setSlip(data.slip || 0);
+                setStepPos(data.stepPos || 0);
+
+                setTensionData(p => [...p.slice(-(MAX_PTS - 1)), { t, actual: data.tension || 0, sp: activeSP }]);
+                setSpeedData(p => [...p.slice(-(MAX_PTS - 1)), { t, rpm: data.rpm || 0, slip: data.slip || 0 }]);
+                
+                const oscVal = +(Math.sin(t) * ((data.rpm || 0) / 400) + (Math.random() - 0.5)).toFixed(2);
+                setOscData(p => [...p.slice(-(MAX_PTS - 1)), { t, v: oscVal }]);
+
+                if (data.tension > 188 || data.slip > 5.8) setMachineStatus("danger");
+                else if (data.tension > 165 || data.slip > 3.8) setMachineStatus("warning");
+                else setMachineStatus("normal");
+              }
             });
 
-            client.on("close", () => {
-              setMqttOnline(false);
-              setEspOnline(false);
-            });
-
-            return () => client.end();
-          }, [stopped, activeSP]);
+            return () => {
+                unsubConnected();
+                unsubSensor();
+                clearTimeout(espTimeoutRef.current);
+            };
+          }, [stopped, activeSP, espOnline]);
 
           // ==========================================
-          // BAGIAN PENGIRIM PERINTAH KE MQTT
+          // BAGIAN PENGIRIM PERINTAH KE FIREBASE
           // ==========================================
           function handleApply() {
             setActiveSP(spInput);
-            addAlarm(`Set point dikirim ke Node-RED → ${spInput} N`, "info");
-
-            // Publish ke MQTT
-            if (mqttClientRef.current && mqttOnline) {
-              mqttClientRef.current.publish("eki/conveyor/control", JSON.stringify({ setPoint: spInput }));
-            }
+            addAlarm(`Set point dikirim ke Firebase → ${spInput} N`, "info");
+            set(ref(db, 'eki/conveyor/control/setPoint'), spInput);
           }
 
           function handleUpdatePID() {
             const nkp = parseFloat(kp) || 1.2, nki = parseFloat(ki) || 0.08, nkd = parseFloat(kd) || 0.05;
             setActivePID({ kp: nkp, ki: nki, kd: nkd });
             addAlarm(`PID dikirim → Kp=${nkp.toFixed(2)} Ki=${nki.toFixed(3)} Kd=${nkd.toFixed(3)}`, "info");
-            setPidMsg("✓ Data PID terkirim ke MQTT");
+            setPidMsg("✓ Data PID tersimpan di Firebase");
             setTimeout(() => setPidMsg(""), 3000);
-
-            // Publish ke MQTT
-            if (mqttClientRef.current && mqttOnline) {
-              mqttClientRef.current.publish("eki/conveyor/pid", JSON.stringify({ kp: nkp, ki: nki, kd: nkd }));
-            }
+            
+            set(ref(db, 'eki/conveyor/pid'), { kp: nkp, ki: nki, kd: nkd });
           }
 
           function handleStop() {
             setStopped(true);
             setMachineStatus("danger");
             addAlarm("⚠ EMERGENCY STOP", "danger");
-            if (mqttClientRef.current && mqttOnline) {
-              mqttClientRef.current.publish("eki/conveyor/control", JSON.stringify({ stop: true }));
-            }
+            set(ref(db, 'eki/conveyor/control/stop'), true);
           }
 
           function handleRestart() {
             setStopped(false);
             setMachineStatus("normal");
             addAlarm("Sistem di-restart", "success");
-            if (mqttClientRef.current && mqttOnline) {
-              mqttClientRef.current.publish("eki/conveyor/control", JSON.stringify({ stop: false }));
-            }
+            set(ref(db, 'eki/conveyor/control/stop'), false);
           }
 
           const sc = {
@@ -244,19 +242,19 @@
                   </div>
                   <div>
                     <div style={{ fontSize: 14, fontWeight: 700, color: "#c8e8ff", letterSpacing: "0.07em" }}>CONVEYOR BELT TENSION CONTROL SYSTEM</div>
-                    <div style={{ fontSize: 10, color: "#3a6080", letterSpacing: "0.08em", marginTop: 2 }}>ESP32 IoT · PID Control · Real-Time Monitoring MQTT</div>
+                    <div style={{ fontSize: 10, color: "#3a6080", letterSpacing: "0.08em", marginTop: 2 }}>ESP32 IoT · PID Control · Real-Time Monitoring Firebase</div>
                   </div>
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11 }}>
                     {espOnline ? <Wifi size={13} color="#10b981" /> : <WifiOff size={13} color="#ef4444" />}
                     <span style={{ color: "#3a6080" }}>ESP32</span>
-                    <span style={{ background: espOnline ? "#052e16" : "#2d0a0a", color: espOnline ? "#10b981" : "#ef4444", padding: "1px 6px", borderRadius: 4, fontSize: 9, fontWeight: 700 }}>{espOnline ? "ONLINE" : "OFFLINE"}</span>
+                    <span style={{ background: espOnline ? "#052e16" : "#2d0a0a", color: espOnline ? "#10b981" : "#ef4444", padding: "1px 6px", borderRadius: 4, fontSize: 9, fontWeight: 700 }}>{espOnline ? "CONNECTED" : "DISCONNECTED"}</span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11 }}>
-                    <Radio size={13} color={mqttOnline ? "#38bdf8" : "#ef4444"} />
-                    <span style={{ color: "#3a6080" }}>MQTT Node-RED</span>
-                    <span style={{ background: mqttOnline ? "#001a2e" : "#2d0a0a", color: mqttOnline ? "#38bdf8" : "#ef4444", padding: "1px 6px", borderRadius: 4, fontSize: 9, fontWeight: 700 }}>{mqttOnline ? "CONNECTED" : "DISCONNECTED"}</span>
+                    <Database size={13} color={firebaseOnline ? "#f59e0b" : "#ef4444"} />
+                    <span style={{ color: "#3a6080" }}>Firebase DB</span>
+                    <span style={{ background: firebaseOnline ? "#2d1b00" : "#2d0a0a", color: firebaseOnline ? "#f59e0b" : "#ef4444", padding: "1px 6px", borderRadius: 4, fontSize: 9, fontWeight: 700 }}>{firebaseOnline ? "CONNECTED" : "DISCONNECTED"}</span>
                   </div>
                   <div style={{ display: "flex", alignItems: "center", gap: 6, background: sc.bg, color: sc.c, padding: "5px 12px", borderRadius: 6, border: `1px solid ${sc.c}50`, fontSize: 11, fontWeight: 700 }}>
                     <sc.Icon size={13} />
@@ -350,7 +348,7 @@
 
                   <div style={{ ...card }}>
                     <div style={sectionTitle}>
-                      <Radio size={13} color="#10b981" />
+                      <Activity size={13} color="#10b981" />
                       <span style={titleTxt}>MECHANICAL OSCILLATION / RESONANCE</span>
                     </div>
                     <div style={{ marginBottom: 6 }}>
@@ -394,7 +392,7 @@
                     </div>
 
                     <button onClick={handleApply} disabled={stopped} style={{ width: "100%", background: stopped ? "#0a1a2e" : "#002e52", color: stopped ? "#264a70" : "#00d4ff", border: `1px solid ${stopped ? "#0a1a2e" : "#004a80"}`, borderRadius: 6, padding: "9px 0", fontFamily: "inherit", fontSize: 12, fontWeight: 700, cursor: stopped ? "not-allowed" : "pointer", letterSpacing: "0.06em", marginBottom: 10 }}>
-                      ▶ APPLY SET POINT TO MQTT
+                      ▶ APPLY SET POINT TO DB
                     </button>
 
                     <button onClick={stopped ? handleRestart : handleStop} style={{ width: "100%", background: stopped ? "#0a2e00" : "#3d0000", color: stopped ? "#4ade80" : "#ff2222", border: `2px solid ${stopped ? "#22c55e" : "#cc0000"}`, borderRadius: 8, padding: "13px 0", fontFamily: "inherit", fontSize: 13, fontWeight: 800, cursor: "pointer", letterSpacing: "0.07em", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
@@ -437,7 +435,7 @@
                     </div>
 
                     <button onClick={handleUpdatePID} disabled={stopped} style={{ width: "100%", background: stopped ? "#0a1220" : "#12003a", color: stopped ? "#264a70" : "#a78bfa", border: `1px solid ${stopped ? "#0a1220" : "#4a1a90"}`, borderRadius: 6, padding: "9px 0", fontFamily: "inherit", fontSize: 12, fontWeight: 700, cursor: stopped ? "not-allowed" : "pointer", letterSpacing: "0.06em" }}>
-                      ⬆ SEND PID PARAMS TO MQTT
+                      ⬆ SEND PID PARAMS TO DB
                     </button>
 
                     {pidMsg && (
