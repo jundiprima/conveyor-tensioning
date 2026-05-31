@@ -8,15 +8,16 @@
     
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     
+    <script src="https://www.gstatic.com/firebasejs/10.10.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.10.0/firebase-database-compat.js"></script>
+    
     <script type="importmap">
     {
       "imports": {
         "react": "https://esm.sh/react@18.2.0",
         "react-dom/client": "https://esm.sh/react-dom@18.2.0/client",
         "recharts": "https://esm.sh/recharts@2.12.0?deps=react@18.2.0,react-dom@18.2.0",
-        "lucide-react": "https://esm.sh/lucide-react@0.344.0?deps=react@18.2.0",
-        "firebase/app": "https://esm.sh/firebase@10.10.0/app",
-        "firebase/database": "https://esm.sh/firebase@10.10.0/database"
+        "lucide-react": "https://esm.sh/lucide-react@0.344.0?deps=react@18.2.0"
       }
     }
     </script>
@@ -42,10 +43,7 @@
           ShieldAlert, CheckCircle2, Clock, TrendingUp, Cpu
         } from "lucide-react";
         
-        // --- INISIALISASI FIREBASE ---
-        import { initializeApp } from "firebase/app";
-        import { getDatabase, ref, onValue, set } from "firebase/database";
-
+        // --- 3. INISIALISASI FIREBASE (Gaya Compat/Global) ---
         const firebaseConfig = {
           apiKey: "AIzaSyAZq9dzRoxUtxT3DnjsHImudc888oCeQsk",
           authDomain: "conveyor-tensioning.firebaseapp.com",
@@ -57,8 +55,11 @@
           measurementId: "G-YMZX7VXHBC"
         };
 
-        const app = initializeApp(firebaseConfig);
-        const db = getDatabase(app);
+        // Cegah inisialisasi ganda
+        if (!window.firebase.apps.length) {
+            window.firebase.initializeApp(firebaseConfig);
+        }
+        const db = window.firebase.database();
 
         const MAX_PTS = 40;
 
@@ -130,31 +131,28 @@
             if (stopped) return;
 
             // 1. Pantau Status Koneksi Dashboard ke Firebase
-            const connectedRef = ref(db, ".info/connected");
-            const unsubConnected = onValue(connectedRef, (snap) => {
+            const connectedRef = db.ref(".info/connected");
+            const connectedCb = connectedRef.on("value", (snap) => {
               if (snap.val() === true) {
                 setFirebaseOnline(true);
                 addAlarm("Terhubung ke Firebase Realtime Database", "success");
               } else {
                 setFirebaseOnline(false);
-                setEspOnline(false); // Kalau web putus dari Firebase, ESP juga dianggap tidak terpantau
+                setEspOnline(false); 
                 addAlarm("Koneksi Firebase terputus", "danger");
               }
             });
 
             // 2. Pantau Data Sensor dari ESP32
-            // Asumsi path di database adalah: eki/conveyor/sensor
-            const sensorRef = ref(db, "eki/conveyor/sensor");
-            const unsubSensor = onValue(sensorRef, (snapshot) => {
+            const sensorRef = db.ref("eki/conveyor/sensor");
+            const sensorCb = sensorRef.on("value", (snapshot) => {
               const data = snapshot.val();
               if (data) {
-                // Jika ada data masuk, ESP dipastikan online
                 if (!espOnline) {
                     setEspOnline(true);
                     addAlarm("ESP32 Online & Mengirim Data", "success");
                 }
 
-                // Reset timer watchdog. Jika 6 detik tidak ada data masuk = ESP Offline
                 clearTimeout(espTimeoutRef.current);
                 espTimeoutRef.current = setTimeout(() => {
                   setEspOnline(false);
@@ -181,8 +179,8 @@
             });
 
             return () => {
-                unsubConnected();
-                unsubSensor();
+                connectedRef.off("value", connectedCb);
+                sensorRef.off("value", sensorCb);
                 clearTimeout(espTimeoutRef.current);
             };
           }, [stopped, activeSP, espOnline]);
@@ -192,32 +190,32 @@
           // ==========================================
           function handleApply() {
             setActiveSP(spInput);
-            addAlarm(`Set point dikirim ke Firebase → ${spInput} N`, "info");
-            set(ref(db, 'eki/conveyor/control/setPoint'), spInput);
+            addAlarm(`Set point dikirim ke DB → ${spInput} N`, "info");
+            db.ref('eki/conveyor/control/setPoint').set(spInput);
           }
 
           function handleUpdatePID() {
             const nkp = parseFloat(kp) || 1.2, nki = parseFloat(ki) || 0.08, nkd = parseFloat(kd) || 0.05;
             setActivePID({ kp: nkp, ki: nki, kd: nkd });
             addAlarm(`PID dikirim → Kp=${nkp.toFixed(2)} Ki=${nki.toFixed(3)} Kd=${nkd.toFixed(3)}`, "info");
-            setPidMsg("✓ Data PID tersimpan di Firebase");
+            setPidMsg("✓ Data PID tersimpan di DB");
             setTimeout(() => setPidMsg(""), 3000);
             
-            set(ref(db, 'eki/conveyor/pid'), { kp: nkp, ki: nki, kd: nkd });
+            db.ref('eki/conveyor/pid').set({ kp: nkp, ki: nki, kd: nkd });
           }
 
           function handleStop() {
             setStopped(true);
             setMachineStatus("danger");
             addAlarm("⚠ EMERGENCY STOP", "danger");
-            set(ref(db, 'eki/conveyor/control/stop'), true);
+            db.ref('eki/conveyor/control/stop').set(true);
           }
 
           function handleRestart() {
             setStopped(false);
             setMachineStatus("normal");
             addAlarm("Sistem di-restart", "success");
-            set(ref(db, 'eki/conveyor/control/stop'), false);
+            db.ref('eki/conveyor/control/stop').set(false);
           }
 
           const sc = {
